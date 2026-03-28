@@ -650,7 +650,6 @@
       display: flex;
     }
 
-    /* ===== MINIMAP ===== */
     #minimap {
       position: absolute;
       bottom: 100px;
@@ -660,7 +659,7 @@
       border: 1px solid rgba(0, 245, 255, 0.25);
       border-radius: 50%;
       overflow: hidden;
-      display: none;
+      background: rgba(0, 10, 15, 0.5);
     }
 
     #minimap canvas {
@@ -1139,13 +1138,13 @@
       </div>
 
       <div class="field-group">
-        <label class="field-label">PRIVATE ROOM CODE (OPTIONAL)</label>
-        <input type="text" id="room-input" placeholder="Leave empty for public" maxlength="10" autocomplete="off"
+        <label class="field-label">ROOM CODE (LEAVE EMPTY TO HOST)</label>
+        <input type="text" id="room-input" placeholder="Code to join, or empty to host" maxlength="10" autocomplete="off"
           style="text-transform: uppercase;">
       </div>
 
-      <button class="play-btn" id="play-btn">⚡ DEPLOY</button>
-      <div class="status-bar" id="status-bar">READY TO CONNECT</div>
+      <button class="play-btn" id="play-btn">⚡ CONNECT</button>
+      <div class="status-bar" id="status-bar">READY (P2P MODE)</div>
     </div>
   </div>
 
@@ -1256,26 +1255,9 @@
       onclick="leaveGame()">LEAVE GAME</button>
   </div>
 
-  <!-- Firebase -->
+  <!-- PeerJS -->
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
   <script type="module">
-    import { initializeApp } from "https://www.gstatic.com/firebasejs/12.11.0/firebase-app.js";
-    import { getAnalytics } from "https://www.gstatic.com/firebasejs/12.11.0/firebase-analytics.js";
-    import { getDatabase, ref, set, onValue, onChildAdded, onChildChanged, onChildRemoved, remove, off, push, serverTimestamp, onDisconnect } from "https://www.gstatic.com/firebasejs/12.11.0/firebase-database.js";
-
-    const firebaseConfig = {
-      apiKey: "AIzaSyASXtGehMiKrbAEfqDzIbkYycjso8xQZOc",
-      authDomain: "juegomameivck.firebaseapp.com",
-      projectId: "juegomameivck",
-      storageBucket: "juegomameivck.firebasestorage.app",
-      messagingSenderId: "453065194426",
-      appId: "1:453065194426:web:a1ac67f8afd0521b45fb83",
-      measurementId: "G-YQT063L3TR",
-      databaseURL: "https://juegomameivck-default-rtdb.firebaseio.com"
-    };
-
-    const fbApp = initializeApp(firebaseConfig);
-    const analytics = getAnalytics(fbApp);
-    const db = getDatabase(fbApp);
 
     // ===========================
     // GAME CONFIG
@@ -1307,12 +1289,10 @@
     let gameMode = 'arcade';
     let localId = null;
     let localName = 'PLAYER';
-    let roomRef = null;
-    let playersRef = null;
-    let bulletsRef = null;
-    let chatRef = null;
-    let pingInterval = null;
-    let pingStartTime = 0;
+    let isHost = false;
+    let peer = null;
+    let hostConn = null;
+    let clientConns = {};
 
     const players = {};
     const bullets = {};
@@ -1481,19 +1461,13 @@
       if (saved) document.getElementById('name-input').value = saved;
 
       document.getElementById('name-input').addEventListener('keydown', e => {
-        if (e.key === 'Enter') startGame();
+        if (e.key === 'Enter') document.getElementById('play-btn').click();
       });
-
-      document.getElementById('play-btn').addEventListener('click', startGame);
     }
 
     function watchOnlineCount() {
-      const connRef = ref(db, '.info/connected');
-      const countRef = ref(db, 'online_count');
-      onValue(countRef, snap => {
-        const count = snap.val() || 0;
-        document.getElementById('online-count').textContent = count + ' ONLINE';
-      });
+      // Disabled in P2P mode
+      document.getElementById('online-count').textContent = 'P2P MULTIPLAYER';
     }
 
     // ===========================
@@ -1505,14 +1479,9 @@
       // Assign ID
       localId = 'p_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
 
-      // Setup Firebase room
+      // Setup PeerJS room
       const customRoom = document.getElementById('room-input').value.trim().toUpperCase();
-      const roomId = customRoom ? 'room_private_' + customRoom : 'room_' + gameMode + '_01';
-      window._roomId = roomId;
-      roomRef = ref(db, 'rooms/' + roomId);
-      playersRef = ref(db, 'rooms/' + roomId + '/players');
-      bulletsRef = ref(db, 'rooms/' + roomId + '/bullets');
-      chatRef = ref(db, 'rooms/' + roomId + '/chat');
+      isHost = !customRoom;
 
       // Init 3D scene
       initScene();
@@ -1531,83 +1500,66 @@
       localState.ammo = [30, 8, 5, 40, 12, 4, 100, 20];
       localState.reserveAmmo = [90, 32, 20, 120, 48, 12, 200, 60];
 
-      // Push to Firebase
-      const myRef = ref(db, 'rooms/' + roomId + '/players/' + localId);
-      await set(myRef, {
-        name: localName,
-        x: localState.x,
-        y: localState.y,
-        z: localState.z,
-        yaw: localState.yaw,
-        health: localState.health,
-        kills: 0,
-        deaths: 0,
-        score: 0,
-        alive: true,
-        weapon: 0,
-        t: Date.now(),
-        color: PLAYER_COLORS[Math.floor(Math.random() * PLAYER_COLORS.length)]
+      if (isHost) {
+        const shortCode = Math.random().toString(36).substring(2, 7).toUpperCase();
+        window._roomId = shortCode;
+        peer = new Peer('VECK-' + shortCode);
+        
+        peer.on('open', (id) => {
+          showNotify('TU CÓDIGO ES: ' + shortCode);
+          finishGameStart();
+        });
+
+        peer.on('connection', (conn) => {
+          clientConns[conn.peer] = conn;
+          conn.on('data', (data) => handleNetworkData(data, conn.peer));
+          conn.on('close', () => {
+            if(players[conn.peer]) removePlayerMesh(conn.peer);
+            delete players[conn.peer];
+            delete clientConns[conn.peer];
+            broadcastData({ type: 'disconnect', id: conn.peer });
+          });
+        });
+
+      } else {
+        window._roomId = customRoom;
+        peer = new Peer();
+        
+        peer.on('open', (id) => {
+          hostConn = peer.connect('VECK-' + customRoom);
+          hostConn.on('open', () => {
+            showNotify('CONNECTED TO ' + customRoom);
+            finishGameStart();
+          });
+          hostConn.on('data', (data) => handleNetworkData(data, null));
+          hostConn.on('close', () => {
+             alert('Host disconnected');
+             location.reload();
+          });
+          hostConn.on('error', () => {
+             alert('Failed to connect to host');
+             location.reload();
+          });
+        });
+      }
+    }
+
+    function finishGameStart() {
+      // Send our initial state
+      localState.color = PLAYER_COLORS[Math.floor(Math.random() * PLAYER_COLORS.length)];
+      localState.name = localName;
+      sendNetworkData({
+        type: 'join',
+        id: localId,
+        state: localState
       });
-
-      // Remove on disconnect
-      onDisconnect(myRef).remove();
-
-      // Listen for players
-      onChildAdded(playersRef, snap => {
-        const id = snap.key;
-        const data = snap.val();
-        if (!data) return;
-        players[id] = data;
-        if (id !== localId) createPlayerMesh(id, data);
-      });
-
-      onChildChanged(playersRef, snap => {
-        const id = snap.key;
-        const data = snap.val();
-        if (!data || id === localId) return;
-        players[id] = data;
-        updatePlayerMesh(id, data);
-      });
-
-      onChildRemoved(playersRef, snap => {
-        const id = snap.key;
-        delete players[id];
-        removePlayerMesh(id);
-      });
-
-      // Listen for bullets
-      onChildAdded(bulletsRef, snap => {
-        const id = snap.key;
-        const data = snap.val();
-        if (!data || data.owner === localId) return;
-        bullets[id] = { ...data, mesh: null, life: 0 };
-        createBulletMesh(id, data);
-      });
-
-      onChildRemoved(bulletsRef, snap => {
-        removeBulletMesh(snap.key);
-      });
-
-      // Listen for chat
-      onChildAdded(chatRef, snap => {
-        const data = snap.val();
-        if (!data) return;
-        addChatMessage(data.name, data.msg);
-      });
-
-      // Increment online count
-      const countRef = ref(db, 'online_count');
-      onValue(countRef, snap => {
-        const c = (snap.val() || 0) + 1;
-        set(countRef, c);
-      }, { onlyOnce: true });
 
       // UI
       document.getElementById('lobby').style.display = 'none';
       document.getElementById('game-canvas').classList.add('visible');
       document.getElementById('hud').classList.add('visible');
       document.getElementById('chat-container').style.display = 'block';
-      document.getElementById('hud-mode').textContent = gameMode.toUpperCase();
+      document.getElementById('hud-mode').innerHTML = isHost ? 'SALA: <strong style="color:var(--neon);font-size:1.4em">' + window._roomId + '</strong>' : 'CLIENTE: ' + window._roomId;
 
       if (isMobile) {
         document.getElementById('touch-controls').classList.add('visible');
@@ -1623,16 +1575,96 @@
 
       gameStarted = true;
       gameLoop();
+    }
 
-      // Ping measurement
-      pingInterval = setInterval(() => {
-        pingStartTime = Date.now();
-        set(ref(db, 'rooms/' + roomId + '/players/' + localId + '/ping_t'), pingStartTime);
-      }, 3000);
+    function sendNetworkData(data) {
+      if (isHost) {
+        broadcastData(data);
+        handleNetworkData(data, localId);
+      } else {
+        if (hostConn && hostConn.open) {
+          hostConn.send(data);
+        }
+      }
+    }
 
-      // Announce arrival
-      await delay(500);
-      showNotify('CONNECTED!');
+    function broadcastData(data, expectPeer) {
+      for (let peerId in clientConns) {
+        if (peerId !== expectPeer && clientConns[peerId].open) {
+          clientConns[peerId].send(data);
+        }
+      }
+    }
+
+    function handleNetworkData(data, fromPeer) {
+      if (isHost && fromPeer && fromPeer !== localId) {
+        broadcastData(data, fromPeer);
+      }
+
+      if (data.type === 'join' || data.type === 'sync') {
+        const id = data.id;
+        if (id === localId) return;
+        const pData = data.state;
+        if (!players[id]) {
+          players[id] = pData;
+          createPlayerMesh(id, pData);
+        } else {
+          players[id] = pData;
+          updatePlayerMesh(id, pData);
+        }
+      } else if (data.type === 'disconnect') {
+        removePlayerMesh(data.id);
+        delete players[data.id];
+      } else if (data.type === 'bullet') {
+        if (data.bullet.owner !== localId) {
+          bullets[data.bulletId] = { ...data.bullet, mesh: null, life: 0 };
+          createBulletMesh(data.bulletId, data.bullet);
+        }
+      } else if (data.type === 'hit') {
+        if (data.hit.victim === localId && localState.alive) {
+           takeDamage(data.hit.damage, data.hit.shooterName, data.hit.weapon);
+        }
+        // Shooter credits themselves locally
+      } else if (data.type === 'chat') {
+        addChatMessage(data.chat.name, data.chat.msg);
+      }
+    }
+
+    // Global graphic effects
+    let gridTexture, noiseTexture;
+    let floatingTexts = [];
+    let recoilPitch = 0, recoilYaw = 0;
+    let targetRecoilPitch = 0, targetRecoilYaw = 0;
+
+    function createProceduralTextures() {
+      const gCv = document.createElement('canvas');
+      gCv.width = 512; gCv.height = 512;
+      const gCtx = gCv.getContext('2d');
+      gCtx.fillStyle = '#050a10';
+      gCtx.fillRect(0,0,512,512);
+      gCtx.strokeStyle = '#00f5ff';
+      gCtx.lineWidth = 2;
+      gCtx.globalAlpha = 0.3;
+      for(let i=0; i<=512; i+=64){
+         gCtx.beginPath(); gCtx.moveTo(i,0); gCtx.lineTo(i,512); gCtx.stroke();
+         gCtx.beginPath(); gCtx.moveTo(0,i); gCtx.lineTo(512,i); gCtx.stroke();
+      }
+      gridTexture = new THREE.CanvasTexture(gCv);
+      gridTexture.wrapS = THREE.RepeatWrapping;
+      gridTexture.wrapT = THREE.RepeatWrapping;
+
+      const nCv = document.createElement('canvas');
+      nCv.width = 256; nCv.height = 256;
+      const nCtx = nCv.getContext('2d');
+      const id = nCtx.createImageData(256,256);
+      for(let i=0; i<id.data.length; i+=4){
+        const v = Math.random()*255;
+        id.data[i] = v; id.data[i+1] = v; id.data[i+2] = v; id.data[i+3] = 40;
+      }
+      nCtx.putImageData(id, 0, 0);
+      noiseTexture = new THREE.CanvasTexture(nCv);
+      noiseTexture.wrapS = THREE.RepeatWrapping;
+      noiseTexture.wrapT = THREE.RepeatWrapping;
     }
 
     // ===========================
@@ -1640,11 +1672,13 @@
     // ===========================
     function initScene() {
       THREE = window.THREE;
+      createProceduralTextures();
+      
       scene = new THREE.Scene();
-      scene.fog = new THREE.FogExp2(0x0a141e, 0.012);
-      scene.background = new THREE.Color(0x0a141e);
+      scene.fog = new THREE.FogExp2(0x0a141e, 0.015);
+      scene.background = new THREE.Color(0x040810);
 
-      camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 500);
+      camera = new THREE.PerspectiveCamera(80, window.innerWidth / window.innerHeight, 0.05, 500);
 
       const canvas = document.getElementById('game-canvas');
       renderer = new THREE.WebGLRenderer({ canvas, antialias: !isMobile, powerPreference: 'high-performance' });
@@ -1686,7 +1720,7 @@
       scene.add(nl3);
 
       // Skybox gradient
-      const skyGeo = new THREE.SphereGeometry(400, 16, 8);
+      const skyGeo = new THREE.SphereGeometry(400, 32, 16);
       const skyMat = new THREE.ShaderMaterial({
         side: THREE.BackSide,
         vertexShader: `
@@ -1700,8 +1734,8 @@
       varying vec3 vPos;
       void main() {
         float t = (normalize(vPos).y + 1.0) * 0.5;
-        vec3 top = vec3(0.01, 0.04, 0.1);
-        vec3 bottom = vec3(0.02, 0.08, 0.15);
+        vec3 top = vec3(0.00, 0.01, 0.03);
+        vec3 bottom = vec3(0.01, 0.05, 0.1);
         gl_FragColor = vec4(mix(bottom, top, t), 1.0);
       }
     `
@@ -1709,24 +1743,23 @@
       skybox = new THREE.Mesh(skyGeo, skyMat);
       scene.add(skybox);
 
-      // Ground
-      const groundGeo = new THREE.PlaneGeometry(MAP_SIZE * 2, MAP_SIZE * 2, 32, 32);
+      // Ground (Cyberpunk Floor)
+      gridTexture.repeat.set(MAP_SIZE / 4, MAP_SIZE / 4);
+      noiseTexture.repeat.set(MAP_SIZE / 2, MAP_SIZE / 2);
+
+      const groundGeo = new THREE.PlaneGeometry(MAP_SIZE * 2, MAP_SIZE * 2, 64, 64);
       const groundMat = new THREE.MeshStandardMaterial({
-        color: 0x0d1a26,
-        roughness: 0.9,
-        metalness: 0.1,
+        color: 0x0a1a2a,
+        roughness: 0.15,
+        metalness: 0.9,
+        map: gridTexture,
+        roughnessMap: noiseTexture
       });
       const ground = new THREE.Mesh(groundGeo, groundMat);
       ground.rotation.x = -Math.PI / 2;
       ground.receiveShadow = true;
       ground.userData.isGround = true;
       scene.add(ground);
-
-      // Ground grid lines
-      const gridHelper = new THREE.GridHelper(MAP_SIZE * 2, 40, 0x00f5ff, 0x001020);
-      gridHelper.material.opacity = 0.15;
-      gridHelper.material.transparent = true;
-      scene.add(gridHelper);
 
       // Clock
       clock = new THREE.Clock();
@@ -1757,11 +1790,16 @@
 
       MAP_LAYOUT.forEach(([cx, cz, w, d, h, type]) => {
         const colors = COLORS[type] || COLORS.building;
+        const wt = gridTexture.clone();
+        wt.repeat.set(w / 4, h / 4);
         const geo = new THREE.BoxGeometry(w, h, d);
         const mat = new THREE.MeshStandardMaterial({
           color: colors[0],
-          roughness: 0.8,
-          metalness: 0.2,
+          roughness: type === 'building' ? 0.3 : 0.7,
+          metalness: type === 'building' ? 0.8 : 0.3,
+          map: type === 'building' ? wt : null,
+          bumpMap: noiseTexture,
+          bumpScale: 0.05
         });
 
         const mesh = new THREE.Mesh(geo, mat);
@@ -1937,11 +1975,10 @@
       if (!mesh) return;
       if (!data.alive) { mesh.visible = false; return; }
       mesh.visible = true;
-      // Smooth interpolation
-      mesh.position.x += (data.x - mesh.position.x) * 0.3;
-      mesh.position.y += (data.y - mesh.position.y) * 0.3;
-      mesh.position.z += (data.z - mesh.position.z) * 0.3;
-      mesh.rotation.y = data.yaw || 0;
+      mesh.userData.targetX = data.x;
+      mesh.userData.targetY = data.y;
+      mesh.userData.targetZ = data.z;
+      mesh.userData.targetYaw = data.yaw || 0;
     }
 
     function removePlayerMesh(id) {
@@ -2203,7 +2240,8 @@
       }
 
       // Recoil
-      localState.pitch -= 0.015;
+      targetRecoilPitch -= w.spread * 1.5;
+      targetRecoilYaw += (Math.random() - 0.5) * w.spread;
 
       // Spread
       const spread = w.spread;
@@ -2235,9 +2273,8 @@
       // Local bullet visual
       createLocalBullet(bulletId, bulletData);
 
-      // Push to Firebase (throttled)
-      set(ref(db, 'rooms/' + window._roomId + '/bullets/' + bulletId), bulletData);
-      setTimeout(() => remove(ref(db, 'rooms/' + window._roomId + '/bullets/' + bulletId)), 3000);
+      // Send bullet via PeerJS
+      sendNetworkData({ type: 'bullet', bulletId, bullet: bulletData });
 
       // Check hits on remote players
       checkBulletHits(bulletData);
@@ -2249,10 +2286,12 @@
     }
 
     function createLocalBullet(id, data) {
-      const geo = new THREE.SphereGeometry(0.06, 4, 4);
+      const geo = new THREE.CylinderGeometry(0.02, 0.02, 1.2, 4);
+      geo.rotateX(Math.PI / 2);
       const mat = new THREE.MeshBasicMaterial({ color: 0xffff44 });
       const mesh = new THREE.Mesh(geo, mat);
       mesh.position.set(data.x, data.y, data.z);
+      mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), new THREE.Vector3(data.dx, data.dy, data.dz).normalize());
       scene.add(mesh);
 
       const trail = new THREE.PointLight(0xffaa00, 2, 4);
@@ -2292,34 +2331,53 @@
       if (hitId) {
         // Show hit marker
         showHitMarker();
-        // Notify firebase of hit
-        const hitRef = ref(db, 'rooms/' + window._roomId + '/hits/' + Date.now());
-        set(hitRef, {
-          victim: hitId,
-          shooter: localId,
-          shooterName: localName,
-          damage: bulletData.damage,
-          weapon: bulletData.weapon,
-          t: Date.now(),
+        const target = players[hitId];
+        const fatal = target && ((target.health || 100) - bulletData.damage <= 0);
+        
+        // Spawn damage text at the estimated hit location
+        const targetMesh = playerMeshes[hitId];
+        if (targetMesh) spawnDamageText(targetMesh.position.x, targetMesh.position.y + 1, targetMesh.position.z, bulletData.damage, fatal);
+
+        // Notify peers of hit
+        sendNetworkData({
+          type: 'hit',
+          hit: {
+            victim: hitId,
+            shooter: localId,
+            shooterName: localName,
+            damage: bulletData.damage,
+            weapon: bulletData.weapon,
+            fatal: fatal,
+            t: Date.now(),
+          }
         });
-        setTimeout(() => remove(hitRef), 5000);
+        if (fatal) {
+           creditKill(target ? target.name : 'PLAYER', bulletData.weapon);
+        }
       }
     }
 
     // ===========================
     // HIT PROCESSING
     // ===========================
-    function setupHitListener() {
-      const hitsRef = ref(db, 'rooms/' + window._roomId + '/hits');
-      onChildAdded(hitsRef, snap => {
-        const data = snap.val();
-        if (!data || data.victim !== localId) return;
-        if (!localState.alive) return;
-
-        const now = Date.now();
-        if (now - data.t > 5000) return; // Stale hit
-
-        takeDamage(data.damage, data.shooterName, data.weapon);
+    function spawnDamageText(x, y, z, damage, fatal) {
+      const el = document.createElement('div');
+      el.textContent = damage;
+      el.style.position = 'absolute';
+      el.style.color = fatal ? '#ff0066' : '#fff';
+      el.style.fontSize = fatal ? '24px' : '16px';
+      el.style.fontWeight = 'bold';
+      el.style.fontFamily = 'Orbitron, sans-serif';
+      el.style.textShadow = '0 0 5px ' + (fatal ? '#ff0066' : '#000');
+      el.style.pointerEvents = 'none';
+      el.style.zIndex = '100';
+      el.style.transform = 'translate(-50%, -50%)';
+      document.body.appendChild(el);
+      
+      floatingTexts.push({
+        el: el, x: x, y: y + 0.5 + Math.random()*0.5, z: z + (Math.random()-0.5)*0.5, 
+        life: 1.0, 
+        vx: (Math.random()-0.5)*2, vy: 2 + Math.random()*2
       });
     }
 
@@ -2340,10 +2398,12 @@
 
       addKillFeedEntry(killerName, localName, weapon);
 
-      // Update firebase
-      const myRef = ref(db, 'rooms/' + window._roomId + '/players/' + localId);
-      set(myRef + '/alive', false);
-      set(myRef + '/deaths', localState.deaths);
+      // Broadcast death
+      sendNetworkData({
+        type: 'sync',
+        id: localId,
+        state: localState
+      });
 
       // Death screen
       const ds = document.getElementById('death-screen');
@@ -2381,20 +2441,10 @@
       updateHUD();
 
       // Push
-      set(ref(db, 'rooms/' + window._roomId + '/players/' + localId), {
-        name: localName,
-        x: localState.x,
-        y: localState.y,
-        z: localState.z,
-        yaw: localState.yaw,
-        health: 100,
-        kills: localState.kills,
-        deaths: localState.deaths,
-        score: localState.score,
-        alive: true,
-        weapon: localState.weapon,
-        t: Date.now(),
-        color: PLAYER_COLORS[Math.floor(Math.random() * PLAYER_COLORS.length)],
+      sendNetworkData({
+        type: 'sync',
+        id: localId,
+        state: localState
       });
 
       showNotify('RESPAWNED!');
@@ -2518,13 +2568,13 @@
       // Camera
       camera.position.set(localState.x, localState.y, localState.z);
       camera.rotation.order = 'YXZ';
-      camera.rotation.y = localState.yaw;
-      camera.rotation.x = localState.pitch;
+      camera.rotation.y = localState.yaw + recoilYaw;
+      camera.rotation.x = localState.pitch + Math.min(recoilPitch, 0);
 
       // Bob
       if (len > 0.1 && localState.onGround) {
         bobTime += dt * 8;
-        camera.position.y += Math.sin(bobTime) * 0.04;
+        camera.position.y += Math.sin(bobTime) * 0.06;
         if (gunMesh) {
           gunMesh.position.y = -0.18 + Math.sin(bobTime) * 0.02;
           gunMesh.rotation.z = Math.sin(bobTime * 0.5) * 0.02;
@@ -2533,9 +2583,9 @@
         bobTime = 0;
       }
 
-      // Auto-fire
+      // Touch Auto-fire
       const w = WEAPONS[localState.weapon];
-      if (w.auto && (touchFire)) {
+      if (w.auto && touchFire) {
         fireBullet();
       }
     }
@@ -2684,7 +2734,12 @@
       // Simple prompt
       const msg = prompt('Chat:');
       if (msg && msg.trim()) {
-        push(chatRef, { name: localName, msg: msg.trim(), t: Date.now() });
+        const text = msg.trim();
+        addChatMessage(localName, text);
+        sendNetworkData({
+          type: 'chat',
+          chat: { name: localName, msg: text, t: Date.now() }
+        });
       }
     }
 
@@ -2720,6 +2775,56 @@
     }
 
     // ===========================
+    // MINIMAP
+    // ===========================
+    function updateMinimap() {
+      const cv = document.getElementById('minimap-canvas');
+      if (!cv) return;
+      const ctx = cv.getContext('2d');
+      ctx.clearRect(0,0,120,120);
+      
+      const cx = localState.x;
+      const cz = localState.z;
+      const scale = 1.2; 
+      const offset = 60; 
+
+      ctx.fillStyle = 'rgba(0, 245, 255, 0.2)';
+      MAP_LAYOUT.forEach(box => {
+        const x = (box[0] - cx) * scale + offset;
+        const y = (box[1] - cz) * scale + offset;
+        const w = box[2] * scale;
+        const h = box[3] * scale;
+        ctx.fillRect(x - w/2, y - h/2, w, h);
+      });
+
+      for(const id in players) {
+         if (!players[id].alive) continue;
+         const p = players[id];
+         const tx = (p.x - cx) * scale + offset;
+         const ty = (p.z - cz) * scale + offset;
+         
+         ctx.beginPath();
+         if(id === localId) {
+            ctx.fillStyle = '#00f5ff';
+            ctx.arc(tx, ty, 3, 0, Math.PI*2);
+         } else {
+            ctx.fillStyle = '#ff0066';
+            ctx.arc(tx, ty, 2.5, 0, Math.PI*2);
+         }
+         ctx.fill();
+         
+         if(id === localId) {
+            ctx.beginPath();
+            ctx.moveTo(tx, ty);
+            ctx.lineTo(tx + Math.sin(localState.yaw + .3)*8, ty - Math.cos(localState.yaw + .3)*8);
+            ctx.lineTo(tx + Math.sin(localState.yaw - .3)*8, ty - Math.cos(localState.yaw - .3)*8);
+            ctx.fillStyle = 'rgba(0, 245, 255, 0.5)';
+            ctx.fill();
+         }
+      }
+    }
+
+    // ===========================
     // NETWORK SYNC
     // ===========================
     let lastSync = 0;
@@ -2728,21 +2833,13 @@
       if (now - lastSync < 50) return; // 20fps sync
       lastSync = now;
 
-      const myRef = ref(db, 'rooms/' + window._roomId + '/players/' + localId);
-      set(myRef, {
-        name: localName,
-        x: Math.round(localState.x * 100) / 100,
-        y: Math.round(localState.y * 100) / 100,
-        z: Math.round(localState.z * 100) / 100,
-        yaw: Math.round(localState.yaw * 100) / 100,
-        health: localState.health,
-        kills: localState.kills,
-        deaths: localState.deaths,
-        score: localState.score,
-        alive: localState.alive,
-        weapon: localState.weapon,
-        t: now,
-        color: PLAYER_COLORS[localId.charCodeAt(2) % PLAYER_COLORS.length],
+      if (!players[localId]) players[localId] = localState;
+      Object.assign(players[localId], localState);
+
+      sendNetworkData({
+        type: 'sync',
+        id: localId,
+        state: localState
       });
     }
 
@@ -2759,25 +2856,62 @@
       updateBullets(dt);
       updateParticles(dt);
 
-      // Interpolate remote players
+      // Interpolate remote players accurately
       for (const id in players) {
         if (id === localId || !playerMeshes[id]) continue;
-        updatePlayerMesh(id, players[id]);
+        const mesh = playerMeshes[id];
+        if (mesh.userData.targetX !== undefined) {
+           mesh.position.x += (mesh.userData.targetX - mesh.position.x) * 12 * dt;
+           mesh.position.y += (mesh.userData.targetY - mesh.position.y) * 12 * dt;
+           mesh.position.z += (mesh.userData.targetZ - mesh.position.z) * 12 * dt;
+           let dy = mesh.userData.targetYaw - mesh.rotation.y;
+           while(dy > Math.PI) dy -= Math.PI*2;
+           while(dy < -Math.PI) dy += Math.PI*2;
+           mesh.rotation.y += dy * 12 * dt;
+        }
+      }
+
+      // Interpolate Recoil
+      recoilPitch += (targetRecoilPitch - recoilPitch) * 12 * dt;
+      recoilYaw += (targetRecoilYaw - recoilYaw) * 12 * dt;
+      targetRecoilPitch -= targetRecoilPitch * 5 * dt;
+      targetRecoilYaw -= targetRecoilYaw * 5 * dt;
+
+      // Update Floating Texts
+      for(let i=floatingTexts.length-1; i>=0; i--){
+        const ft = floatingTexts[i];
+        ft.life -= dt;
+        if(ft.life <= 0){
+          ft.el.remove(); floatingTexts.splice(i, 1); continue;
+        }
+        ft.x += ft.vx * dt;
+        ft.y += ft.vy * dt;
+        ft.vy -= 8 * dt; // gravity
+        
+        const pos = new THREE.Vector3(ft.x, ft.y, ft.z);
+        pos.project(camera);
+        if(pos.z > 1) { ft.el.style.display = 'none'; } 
+        else {
+           ft.el.style.display = 'block';
+           ft.el.style.left = (pos.x * .5 + .5) * window.innerWidth + 'px';
+           ft.el.style.top = (pos.y * -.5 + .5) * window.innerHeight + 'px';
+           ft.el.style.opacity = ft.life;
+        }
       }
 
       // Muzzle flash decay
       if (muzzleFlashTimer > 0) {
         muzzleFlashTimer -= dt;
         if (muzzleFlashTimer <= 0) {
-          muzzleFlashTimer = 0;
-          if (muzzleFlash) muzzleFlash.intensity = 0;
+           muzzleFlashTimer = 0;
+           if (muzzleFlash) muzzleFlash.intensity = 0;
         }
       }
 
       // Auto-fire desktop
       const wep = WEAPONS[localState.weapon];
-      if (wep.auto && pointerLocked) {
-        // Check mouse held - handled by separate state
+      if (wep.auto && mouseHeld && pointerLocked && localState.alive) {
+        fireBullet();
       }
 
       // Sync
@@ -2786,6 +2920,7 @@
       // HUD updates (every frame is fine)
       updateLeaderboard();
       updatePingDisplay();
+      updateMinimap();
 
       // Animate neon lights
       const t = performance.now() / 1000;
@@ -2817,9 +2952,7 @@
 
     window.leaveGame = function () {
       gameStarted = false;
-      if (roomRef && localId) {
-        remove(ref(db, 'rooms/' + window._roomId + '/players/' + localId));
-      }
+      sendNetworkData({ type: 'disconnect', id: localId });
       location.reload();
     };
 
@@ -2828,20 +2961,7 @@
     window.addEventListener('mousedown', e => { if (e.button === 0) mouseHeld = true; });
     window.addEventListener('mouseup', e => { if (e.button === 0) mouseHeld = false; });
 
-    // Auto-fire in loop
-    function patchedAutoFire() {
-      const wep2 = WEAPONS[localState.weapon];
-      if (wep2 && wep2.auto && mouseHeld && pointerLocked && localState.alive) {
-        fireBullet();
-      }
-    }
-    const _raf = requestAnimationFrame;
-    requestAnimationFrame = function (cb) {
-      return _raf.call(window, (t) => {
-        if (gameStarted) patchedAutoFire();
-        cb(t);
-      });
-    };
+    // Auto-fire integrated in game loop now
 
     // ===========================
     // KILLS CREDITED
@@ -2866,21 +2986,8 @@
       updateHUD();
     }
 
-    // Listen for when our bullets hit enemies (by watching hits where WE are shooter)
-    function listenForMyKills() {
-      const hitsRef2 = ref(db, 'rooms/' + window._roomId + '/hits');
-      onChildAdded(hitsRef2, snap => {
-        const data = snap.val();
-        if (!data || data.shooter !== localId) return;
-        const now = Date.now();
-        if (now - data.t > 5000) return;
-        // Check if target died
-        const target = players[data.victim];
-        if (target && target.health <= 0 && target.alive === false) {
-          creditKill(target.name || 'PLAYER', data.weapon);
-        }
-      });
-    }
+    // Replaced by PeerJS
+    function listenForMyKills() { }
 
     // ===========================
     // BOOTSTRAP
@@ -2893,8 +3000,6 @@
         document.getElementById('status-bar').textContent = 'JOINING SERVER...';
         document.getElementById('play-btn').disabled = true;
         await startGame();
-        setupHitListener();
-        listenForMyKills();
       };
     }
 
