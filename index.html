@@ -1138,6 +1138,12 @@
         </div>
       </div>
 
+      <div class="field-group">
+        <label class="field-label">PRIVATE ROOM CODE (OPTIONAL)</label>
+        <input type="text" id="room-input" placeholder="Leave empty for public" maxlength="10" autocomplete="off"
+          style="text-transform: uppercase;">
+      </div>
+
       <button class="play-btn" id="play-btn">⚡ DEPLOY</button>
       <div class="status-bar" id="status-bar">READY TO CONNECT</div>
     </div>
@@ -1477,6 +1483,8 @@
       document.getElementById('name-input').addEventListener('keydown', e => {
         if (e.key === 'Enter') startGame();
       });
+
+      document.getElementById('play-btn').addEventListener('click', startGame);
     }
 
     function watchOnlineCount() {
@@ -1498,7 +1506,8 @@
       localId = 'p_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
 
       // Setup Firebase room
-      const roomId = 'room_' + gameMode + '_01';
+      const customRoom = document.getElementById('room-input').value.trim().toUpperCase();
+      const roomId = customRoom ? 'room_private_' + customRoom : 'room_' + gameMode + '_01';
       window._roomId = roomId;
       roomRef = ref(db, 'rooms/' + roomId);
       playersRef = ref(db, 'rooms/' + roomId + '/players');
